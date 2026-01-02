@@ -212,7 +212,7 @@ static gboolean my_application_local_command_line(GApplication* application,
 
   if (has_uri && g_application_get_is_remote(application)) {
     // Another instance is running - send URIs to it
-    g_autoptr(GFile)* files = g_new0(GFile*, argc);
+    GFile** files = g_new0(GFile*, argc);
     gint n_files = 0;
 
     for (gint i = 1; i < argc; i++) {
