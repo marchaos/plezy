@@ -16,6 +16,9 @@ struct _MyApplication {
   GtkOverlay* overlay;
   GtkGLArea* gl_area;
   FlView* flutter_view;
+
+  // Method channel for URI handling
+  FlMethodChannel* uri_channel;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -137,6 +140,47 @@ static void my_application_activate(GApplication* application) {
 
   gtk_widget_show(GTK_WIDGET(window));
   gtk_widget_grab_focus(GTK_WIDGET(self->flutter_view));
+
+  // Set up method channel for URI handling
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->uri_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(self->flutter_view)),
+      "com.edde746.plezy/uri",
+      FL_METHOD_CODEC(codec));
+}
+
+// Send URI to Flutter via method channel
+static void send_uri_to_flutter(MyApplication* self, const gchar* uri) {
+  if (self->uri_channel == nullptr) {
+    g_warning("URI channel not initialized, cannot send URI: %s", uri);
+    return;
+  }
+
+  g_autoptr(FlValue) args = fl_value_new_string(uri);
+  fl_method_channel_invoke_method(self->uri_channel, "onUri", args,
+                                  nullptr, nullptr, nullptr);
+}
+
+// Implements GApplication::open - handles URIs from other instances
+static void my_application_open(GApplication* application,
+                                GFile** files,
+                                gint n_files,
+                                const gchar* hint) {
+  MyApplication* self = MY_APPLICATION(application);
+
+  // Bring window to front
+  GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+  if (windows != nullptr) {
+    gtk_window_present(GTK_WINDOW(windows->data));
+  }
+
+  // Forward URIs to Flutter
+  for (gint i = 0; i < n_files; i++) {
+    g_autofree gchar* uri = g_file_get_uri(files[i]);
+    if (uri != nullptr) {
+      send_uri_to_flutter(self, uri);
+    }
+  }
 }
 
 // Implements GApplication::local_command_line.
@@ -151,6 +195,42 @@ static gboolean my_application_local_command_line(GApplication* application,
   if (!g_application_register(application, nullptr, &error)) {
     g_warning("Failed to register: %s", error->message);
     *exit_status = 1;
+    return TRUE;
+  }
+
+  // Check if this is a URI invocation
+  gchar** args = *arguments;
+  gint argc = g_strv_length(args);
+  gboolean has_uri = FALSE;
+
+  for (gint i = 1; i < argc; i++) {
+    if (g_str_has_prefix(args[i], "plezy://")) {
+      has_uri = TRUE;
+      break;
+    }
+  }
+
+  if (has_uri && g_application_get_is_remote(application)) {
+    // Another instance is running - send URIs to it
+    g_autoptr(GFile)* files = g_new0(GFile*, argc);
+    gint n_files = 0;
+
+    for (gint i = 1; i < argc; i++) {
+      if (g_str_has_prefix(args[i], "plezy://")) {
+        files[n_files++] = g_file_new_for_uri(args[i]);
+      }
+    }
+
+    if (n_files > 0) {
+      g_application_open(application, files, n_files, "");
+    }
+
+    for (gint i = 0; i < n_files; i++) {
+      g_object_unref(files[i]);
+    }
+    g_free(files);
+
+    *exit_status = 0;
     return TRUE;
   }
 
@@ -187,6 +267,7 @@ static void my_application_dispose(GObject* object) {
 
 static void my_application_class_init(MyApplicationClass* klass) {
   G_APPLICATION_CLASS(klass)->activate = my_application_activate;
+  G_APPLICATION_CLASS(klass)->open = my_application_open;
   G_APPLICATION_CLASS(klass)->local_command_line =
       my_application_local_command_line;
   G_APPLICATION_CLASS(klass)->startup = my_application_startup;
@@ -198,6 +279,7 @@ static void my_application_init(MyApplication* self) {
   self->overlay = nullptr;
   self->gl_area = nullptr;
   self->flutter_view = nullptr;
+  self->uri_channel = nullptr;
 }
 
 MyApplication* my_application_new() {
@@ -209,6 +291,6 @@ MyApplication* my_application_new() {
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID,
-                                     "flags", G_APPLICATION_NON_UNIQUE,
+                                     "flags", G_APPLICATION_HANDLES_OPEN,
                                      nullptr));
 }

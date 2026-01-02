@@ -29,6 +29,7 @@ import 'downloads/downloads_screen.dart';
 import 'settings/settings_screen.dart';
 import 'video_player_screen.dart';
 import '../watch_together/watch_together.dart';
+import '../services/uri_handler_service.dart';
 
 /// Provides access to the main screen's focus control.
 class MainScreenFocusScope extends InheritedWidget {
@@ -109,6 +110,7 @@ class _MainScreenState extends State<MainScreen> with RouteAware {
     // Set up Watch Together callbacks immediately (must be synchronous to catch early messages)
     if (!_isOffline) {
       _setupWatchTogetherCallback();
+      _setupUriHandler();
     }
 
     // Set up data invalidation callback for profile switching (skip in offline mode)
@@ -224,6 +226,52 @@ class _MainScreenState extends State<MainScreen> with RouteAware {
     }
   }
 
+  void _setupUriHandler() {
+    UriHandlerService.instance.setCallback(_handleUri);
+  }
+
+  Future<void> _handleUri(Uri uri) async {
+    appLogger.i('Handling deep link: $uri');
+
+    final ratingKey = UriHandlerService.extractRatingKey(uri);
+    if (ratingKey == null) {
+      appLogger.w('Deep link missing rating key: $uri');
+      return;
+    }
+
+    if (!mounted) return;
+
+    try {
+      final multiServer = context.read<MultiServerProvider>();
+      final clients = multiServer.serverManager.onlineClients.values.toList();
+
+      if (clients.isEmpty) {
+        appLogger.w('No online servers available for deep link');
+        return;
+      }
+
+      final client = clients.first;
+      final metadata = await client.getMetadataWithImages(ratingKey);
+
+      if (metadata == null || !mounted) {
+        appLogger.w('Could not fetch metadata for rating key: $ratingKey');
+        return;
+      }
+
+      final isPreplay = UriHandlerService.isPreplay(uri);
+
+      if (isPreplay) {
+        appLogger.d('Deep link: showing preplay for ${metadata.title}');
+        // TODO: Navigate to details screen instead
+      }
+
+      appLogger.i('Deep link: starting playback for ${metadata.title}');
+      await navigateToVideoPlayer(context, metadata: metadata);
+    } catch (e) {
+      appLogger.e('Failed to handle deep link', error: e);
+    }
+  }
+
   /// Navigate to media when host switches content in Watch Together session
   Future<void> _navigateToWatchTogetherMedia(String ratingKey, String serverId) async {
     if (!mounted) return; // Check before any context usage
@@ -278,6 +326,7 @@ class _MainScreenState extends State<MainScreen> with RouteAware {
   void dispose() {
     routeObserver.unsubscribe(this);
     _offlineModeProvider?.removeListener(_handleOfflineStatusChanged);
+    UriHandlerService.instance.clearCallback();
     _sidebarFocusScope.dispose();
     _contentFocusScope.dispose();
     super.dispose();
